@@ -1,0 +1,417 @@
+"""
+Персональный Telegram-бот: Тренировки + Питание (Похудение)
+Пользователь: женщина, 38 лет, 167 см, 61.6 → 55 кг
+Зал, 4 раза в неделю, высокобелковое питание, опыт 1 месяц
+"""
+
+import asyncio
+import json
+import os
+from datetime import datetime, timedelta
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+
+# ====================== НАСТРОЙКИ ======================
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_ОТ_BOTFATHER"  # <-- обязательно замени!
+
+# Персональные данные
+PROFILE = {
+    "name": "Пользователь",
+    "gender": "Ж",
+    "age": 38,
+    "height": 167,
+    "weight": 61.6,
+    "target_weight": 55.0,
+    "goal": "похудение",
+    "experience": "1 месяц",
+    "training_days": 4,
+    "session_duration": "1-1.5 часа",
+    "diet_type": "высокобелковое",
+    "calories": 1520,
+    "protein": 120,
+    "fat": 48,
+    "carbs": 145,
+}
+
+DATA_FILE = "user_data.json"
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "weight_log": [],
+        "workout_log": [],
+        "food_log": [],
+        "current_week": 1,
+        "last_workout_day": None,
+    }
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+user_data = load_data()
+
+class Form(StatesGroup):
+    waiting_weight = State()
+    waiting_food = State()
+    waiting_workout_note = State()
+
+def main_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(text="🏋️ Тренировка"),
+        KeyboardButton(text="🍎 Питание")
+    )
+    builder.row(
+        KeyboardButton(text="📊 Мой прогресс"),
+        KeyboardButton(text="⚙️ Профиль")
+    )
+    builder.row(
+        KeyboardButton(text="💧 Вода"),
+        KeyboardButton(text="📅 План на неделю")
+    )
+    return builder.as_markup(resize_keyboard=True)
+
+def workout_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(text="День 1 — Низ + Кор"),
+        KeyboardButton(text="День 2 — Верх")
+    )
+    builder.row(
+        KeyboardButton(text="День 3 — Низ + Кардио"),
+        KeyboardButton(text="День 4 — Full Body")
+    )
+    builder.row(KeyboardButton(text="⬅️ Назад"))
+    return builder.as_markup(resize_keyboard=True)
+
+def nutrition_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(text="🍽 Меню на день"),
+        KeyboardButton(text="➕ Записать еду")
+    )
+    builder.row(
+        KeyboardButton(text="🥩 Идеи высокобелковых блюд"),
+        KeyboardButton(text="⬅️ Назад")
+    )
+    return builder.as_markup(resize_keyboard=True)
+
+WORKOUTS = {
+    "День 1 — Низ + Кор": {
+        "title": "День 1: Ноги + Ягодицы + Кор (силовой)",
+        "duration": "70–85 мин",
+        "focus": "Сила ног и ягодиц + укрепление кора",
+        "exercises": [
+            "1. Приседания со штангой (или гоблет) — 4×8–10",
+            "2. Румынская тяга с гантелями — 3×10–12",
+            "3. Выпады назад с гантелями — 3×10 на ногу",
+            "4. Ягодичный мост / хип-траст — 4×12–15",
+            "5. Разгибание ног в тренажёре — 3×12–15",
+            "6. Сгибание ног лёжа — 3×12–15",
+            "7. Планка — 3×40–60 сек",
+            "8. Скручивания / bicycle crunch — 3×15–20",
+        ],
+        "tips": "Отдых 90–120 сек между подходами. Последние 2 подхода — почти до отказа. Вес подбирай так, чтобы 1–2 повторения в запасе."
+    },
+    "День 2 — Верх": {
+        "title": "День 2: Верх тела (тяга + жим)",
+        "duration": "65–80 мин",
+        "focus": "Спина, грудь, плечи, руки",
+        "exercises": [
+            "1. Тяга верхнего блока (широкий хват) — 4×10–12",
+            "2. Жим гантелей лёжа / в тренажёре — 3×10–12",
+            "3. Тяга гантели в наклоне — 3×10–12 на руку",
+            "4. Жим гантелей сидя (плечи) — 3×10–12",
+            "5. Разведение гантелей в стороны — 3×12–15",
+            "6. Сгибание рук с гантелями (бицепс) — 3×12",
+            "7. Разгибание на трицепс (блок или гантель) — 3×12–15",
+            "8. Подъём корпуса на гиперэкстензии (лёгкий) — 3×15",
+        ],
+        "tips": "Контролируй технику. Не гонись за большими весами — лучше качество. В конце можешь добавить 5–7 мин лёгкого кардио."
+    },
+    "День 3 — Низ + Кардио": {
+        "title": "День 3: Ноги (объём) + кардио",
+        "duration": "75–90 мин",
+        "focus": "Объёмная работа на ноги + жиросжигание",
+        "exercises": [
+            "1. Жим ногами — 4×12–15",
+            "2. Болгарские выпады — 3×10–12 на ногу",
+            "3. Ягодичный мост одной ногой — 3×12 на сторону",
+            "4. Приседания в смитке / goblet — 3×12",
+            "5. Отведение ноги в кроссовере (ягодицы) — 3×15",
+            "6. Подъёмы на носки стоя — 4×15–20",
+            "7. Кардио: эллипс / дорожка / велосипед — 15–20 мин (пульс 130–150)",
+        ],
+        "tips": "Можно делать суперсеты (например, жим ногами + отведение). Кардио в конце — в среднем темпе, можно говорить."
+    },
+    "День 4 — Full Body": {
+        "title": "День 4: Full Body (функциональный + сила)",
+        "duration": "70–85 мин",
+        "focus": "Всё тело + метаболический стресс",
+        "exercises": [
+            "1. Становая тяга (румынская или классическая лёгкая) — 3×8–10",
+            "2. Жим гантелей стоя / сидя — 3×10",
+            "3. Подтягивания в гравитроне / тяга горизонтального блока — 3×8–12",
+            "4. Выпады ходьбой или на месте — 3×10 на ногу",
+            "5. Отжимания от пола / с колен / в тренажёре — 3×макс",
+            "6. Планка с касанием плеч — 3×30–40 сек",
+            "7. Фермерская прогулка (гантели) — 3×30–40 м",
+            "8. Финишер: берпи или jumping jacks — 3×30 сек",
+        ],
+        "tips": "Это день «добивки». Работай в хорошем темпе, но без потери техники. Если устала — убери финишер."
+    },
+}
+
+DAILY_MENU = """
+🍽 <b>Пример меню на ~1520 ккал (высокобелковое)</b>
+
+<b>Завтрак (~350 ккал)</b>
+• Овсянка 40 г + протеин 25 г + ягоды 100 г + корица
+• или Яичница из 3 белков + 1 желток + овощи + цельнозерновой тост
+
+<b>Перекус 1 (~200 ккал)</b>
+• Творог 150 г 5% + огурец / зелень
+• или Греческий йогурт 150 г + протеин
+
+<b>Обед (~400 ккал)</b>
+• Куриная грудка 150 г / индейка
+• Гречка / бурый рис / киноа 60 г сухой
+• Большой салат (огурцы, помидоры, листовой салат, зелень) + 5 г масла
+
+<b>Перекус 2 (~200 ккал)</b>
+• Протеиновый коктейль + яблоко / морковь
+• или Тунец в собственном соку 1 банка + овощи
+
+<b>Ужин (~350 ккал)</b>
+• Рыба (лосось / треска / минтай) 150–180 г или постная говядина
+• Овощи на пару / запечённые (брокколи, кабачок, спаржа)
+• Можно добавить ½ авокадо или 10 г орехов
+
+<b>Поздний перекус (по желанию, ~100 ккал)</b>
+• Казеин / творог 100 г на ночь
+"""
+
+PROTEIN_IDEAS = """
+🥩 <b>Высокобелковые идеи (быстро)</b>
+
+• Куриная грудка / индейка (готовая) + любые овощи
+• Творог 0–5% + зелень / огурцы / помидоры
+• Яичные белки (можно много) + 1–2 желтка
+• Тунец / сардины / лосось консервированный
+• Креветки / кальмары
+• Протеиновый коктейль (сыворотка или растительный)
+• Греческий йогурт / skyr
+• Нежирная говядина / телятина
+• Тофу / темпе (если любишь)
+• Рыба на пару / запечённая
+
+<b>Быстрые сочетания:</b>
+1. Творог + огурец + протеин
+2. Яичница из белков + шпинат
+3. Курица + салат + ½ авокадо
+4. Тунец + рис / гречка (небольшая порция)
+5. Протеин + банан + арахисовая паста (1 ч.л.)
+"""
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    text = (
+        f"Привет! 👋 Я твой персональный бот по тренировкам и питанию.\n\n"
+        f"<b>Твоя цель:</b> похудение с {PROFILE['weight']} кг → {PROFILE['target_weight']} кг\n"
+        f"<b>Калории:</b> {PROFILE['calories']} ккал\n"
+        f"<b>БЖУ:</b> Б {PROFILE['protein']} г | Ж {PROFILE['fat']} г | У {PROFILE['carbs']} г\n\n"
+        f"Тренировки 4 раза в неделю в зале, высокобелковое питание.\n\n"
+        f"Выбери, что нужно:"
+    )
+    await message.answer(text, reply_markup=main_kb(), parse_mode="HTML")
+
+@dp.message(F.text == "⬅️ Назад")
+async def back_to_main(message: types.Message):
+    await message.answer("Главное меню:", reply_markup=main_kb())
+
+@dp.message(F.text == "⚙️ Профиль")
+async def show_profile(message: types.Message):
+    text = (
+        f"👤 <b>Твой профиль</b>\n\n"
+        f"Пол: {PROFILE['gender']}\n"
+        f"Возраст: {PROFILE['age']}\n"
+        f"Рост: {PROFILE['height']} см\n"
+        f"Текущий вес: {PROFILE['weight']} кг\n"
+        f"Цель: {PROFILE['target_weight']} кг\n"
+        f"Опыт: {PROFILE['experience']}\n"
+        f"Тренировки: {PROFILE['training_days']}× в неделю\n"
+        f"Питание: {PROFILE['diet_type']}\n\n"
+        f"<b>Целевые показатели:</b>\n"
+        f"Калории: {PROFILE['calories']} ккал\n"
+        f"Белки: {PROFILE['protein']} г\n"
+        f"Жиры: {PROFILE['fat']} г\n"
+        f"Углеводы: {PROFILE['carbs']} г"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=main_kb())
+
+@dp.message(F.text == "🏋️ Тренировка")
+async def workout_menu(message: types.Message):
+    await message.answer(
+        "Выбери день тренировки:\n\n"
+        "Рекомендуемый порядок:\n"
+        "День 1 → День 2 → отдых → День 3 → День 4 → 2 дня отдыха\n"
+        "или 2 через 1, как удобнее.",
+        reply_markup=workout_kb()
+    )
+
+@dp.message(F.text.in_(WORKOUTS.keys()))
+async def show_workout(message: types.Message):
+    w = WORKOUTS[message.text]
+    exercises = "\n".join(w["exercises"])
+    text = (
+        f"<b>{w['title']}</b>\n"
+        f"⏱ {w['duration']}\n"
+        f"🎯 {w['focus']}\n\n"
+        f"{exercises}\n\n"
+        f"💡 <i>{w['tips']}</i>\n\n"
+        f"После тренировки можешь написать «готово» — я запишу."
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=workout_kb())
+
+@dp.message(F.text == "📅 План на неделю")
+async def weekly_plan(message: types.Message):
+    text = (
+        "<b>Рекомендуемый план на неделю</b>\n\n"
+        "Пн — День 1 (Низ + Кор)\n"
+        "Вт — День 2 (Верх)\n"
+        "Ср — отдых или лёгкая прогулка\n"
+        "Чт — День 3 (Низ + Кардио)\n"
+        "Пт — День 4 (Full Body)\n"
+        "Сб — отдых\n"
+        "Вс — отдых / активное восстановление\n\n"
+        "Можно сдвигать дни под свой график. Главное — 4 силовые сессии."
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=main_kb())
+
+@dp.message(F.text == "🍎 Питание")
+async def nutrition_menu(message: types.Message):
+    await message.answer("Раздел питания:", reply_markup=nutrition_kb())
+
+@dp.message(F.text == "🍽 Меню на день")
+async def daily_menu(message: types.Message):
+    await message.answer(DAILY_MENU, parse_mode="HTML", reply_markup=nutrition_kb())
+
+@dp.message(F.text == "🥩 Идеи высокобелковых блюд")
+async def protein_ideas(message: types.Message):
+    await message.answer(PROTEIN_IDEAS, parse_mode="HTML", reply_markup=nutrition_kb())
+
+@dp.message(F.text == "📊 Мой прогресс")
+async def progress(message: types.Message):
+    weights = user_data.get("weight_log", [])
+    workouts = user_data.get("workout_log", [])
+    
+    text = "<b>📊 Твой прогресс</b>\n\n"
+    
+    if weights:
+        text += "<b>Вес:</b>\n"
+        for entry in weights[-7:]:
+            text += f"• {entry['date']}: {entry['weight']} кг\n"
+        last = weights[-1]["weight"]
+        start = PROFILE["weight"]
+        diff = round(start - last, 1)
+        text += f"\nИзменение с начала: {diff:+} кг\n"
+    else:
+        text += "Вес ещё не записывался.\nНапиши «вес 61.2» чтобы добавить.\n"
+    
+    text += f"\n<b>Тренировок записано:</b> {len(workouts)}\n"
+    
+    if workouts:
+        text += "Последние:\n"
+        for w in workouts[-5:]:
+            text += f"• {w['date']}: {w['day']}\n"
+    
+    text += "\nЧтобы записать вес — напиши, например: <code>вес 60.8</code>"
+    await message.answer(text, parse_mode="HTML", reply_markup=main_kb())
+
+@dp.message(F.text == "💧 Вода")
+async def water(message: types.Message):
+    text = (
+        "💧 <b>Рекомендация по воде</b>\n\n"
+        "При похудении и тренировках в зале цель — <b>2.3–2.8 литра</b> в день.\n\n"
+        "Простая схема:\n"
+        "• Утром натощак — 300–400 мл\n"
+        "• За 30 мин до тренировки — 300 мл\n"
+        "• Во время тренировки — 400–600 мл\n"
+        "• Остальное равномерно в течение дня\n\n"
+        "Можно добавить электролиты, если сильно потеешь."
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=main_kb())
+
+@dp.message(F.text.regexp(r"(?i)вес\s+(\d+[.,]?\d*)"))
+async def log_weight(message: types.Message):
+    import re
+    match = re.search(r"(\d+[.,]?\d*)", message.text)
+    if match:
+        weight = float(match.group(1).replace(",", "."))
+        entry = {
+            "date": datetime.now().strftime("%d.%m.%Y"),
+            "weight": weight
+        }
+        user_data.setdefault("weight_log", []).append(entry)
+        save_data(user_data)
+        
+        diff = round(PROFILE["weight"] - weight, 1)
+        await message.answer(
+            f"✅ Вес записан: <b>{weight} кг</b>\n"
+            f"Изменение с исходного: {diff:+} кг\n\n"
+            f"Так держать!",
+            parse_mode="HTML",
+            reply_markup=main_kb()
+        )
+
+@dp.message(F.text.regexp(r"(?i)готово|тренировка сделана|сделала"))
+async def log_workout(message: types.Message):
+    entry = {
+        "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "day": "Тренировка"
+    }
+    user_data.setdefault("workout_log", []).append(entry)
+    save_data(user_data)
+    await message.answer(
+        "✅ Тренировка записана! Отличная работа 💪\n"
+        "Не забудь белок в ближайшие 1–2 часа.",
+        reply_markup=main_kb()
+    )
+
+@dp.message(F.text == "➕ Записать еду")
+async def food_start(message: types.Message, state: FSMContext):
+    await state.set_state(Form.waiting_food)
+    await message.answer(
+        "Напиши, что съела (можно кратко):\n"
+        "Например: «куриная грудка 150г, гречка 50г, салат»\n\n"
+        "Или просто калории: «450 ккал»"
+    )
+
+@dp.message(Form.waiting_food)
+async def food_save(message: types.Message, state: FSMContext):
+    entry = {
+        "date": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "text": message.text
+    }
+    user_data.setdefault("food_log", []).append(entry)
+    save_data(user_data)
+    await state.clear()
+    await message.answer("✅ Записала!", reply_markup=nutrition_kb())
+
+async def main():
+    print("Бот запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
